@@ -33,3 +33,10 @@ Install `ffmpeg` for media extraction/remuxing and `python-tk` for the desktop G
 
 ```bash
 brew install ffmpeg python-tk@3.11
+```
+
+---
+
+## License
+
+Notice: This repository contains source code licensed under the MIT License. However, this project relies on XTTS v2 model weights, which are licensed under the Coqui Public Model License (CPML). Because the CPML strictly prohibits any commercial use of the model and its generated audio outputs, this entire project can only be used for non-commercial purposes (research, personal hobby, or testing). Any commercial deployment is strictly forbidden by the underlying model terms.
