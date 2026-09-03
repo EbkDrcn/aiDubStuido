@@ -1,7 +1,10 @@
 # dub_gui.py
 
 import os
+import sys
 import threading
+import subprocess
+import shutil
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import pysrt
@@ -9,9 +12,9 @@ import dub_pipeline
 
 LANG_MAP = {
     "Turkish": "tr",
+    "Hindi": "hi",
     "Arabic": "ar",
     "Russian": "ru",
-    "Hindi": "hi",
     "English": "en",
     "Spanish": "es",
     "French": "fr",
@@ -26,137 +29,46 @@ LANG_MAP = {
     "Hungarian": "hu"
 }
 
+FFPLAY_BIN = "/opt/homebrew/bin/ffplay" if os.path.exists("/opt/homebrew/bin/ffplay") else shutil.which("ffplay")
 
-class DubbingApp(tk.Tk):
+
+class StudioApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("AI Local Video Dubber Studio")
-        self.geometry("1060x860")
-        self.minsize(900, 700)
+        self.title("AI Local Video Dubbing & Translation Studio")
+        self.geometry("1240x860")
+        self.minsize(1050, 720)
 
-        self.subs_cache = None
-        self.trans_subs_cache = None
-
-        self.video_path_var = tk.StringVar()
-        self.folder_name_var = tk.StringVar(value="output_run_1")
-        self.model_name_var = tk.StringVar(value="qwen3.5:9b-instruct")
-        self.src_lang_var = tk.StringVar(value="Turkish")
-        self.tgt_lang_var = tk.StringVar(value="Hindi")
+        # Global in-memory caches
+        self.src_subs = pysrt.SubRipFile()
+        self.tgt_subs = pysrt.SubRipFile()
+        self.current_preview_video = None
+        self.ffplay_proc = None
 
         self.setup_ui()
 
     def setup_ui(self):
-        # 1. TOP CONFIGURATION CARD
-        config_frame = ttk.LabelFrame(self, text=" 1. Project Setup ", padding=12)
-        config_frame.pack(fill="x", padx=15, pady=6)
+        # Top Notebook (Tabs)
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True)
 
-        # Video selector
-        ttk.Label(config_frame, text="Input Video:").grid(row=0, column=0, sticky="w", pady=4)
-        ttk.Entry(config_frame, textvariable=self.video_path_var, width=65).grid(row=0, column=1, padx=6, pady=4)
-        ttk.Button(config_frame, text="Browse...", command=self.browse_video).grid(row=0, column=2, pady=4)
+        self.tab1 = ttk.Frame(self.notebook)
+        self.tab2 = ttk.Frame(self.notebook)
+        self.tab3 = ttk.Frame(self.notebook)
 
-        # Output folder & model name
-        ttk.Label(config_frame, text="Output Folder:").grid(row=1, column=0, sticky="w", pady=4)
-        ttk.Entry(config_frame, textvariable=self.folder_name_var, width=25).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+        self.notebook.add(self.tab1, text="  1. Subtitle & Video Editor  ")
+        self.notebook.add(self.tab2, text="  2. XTTS Voice Dubbing  ")
+        self.notebook.add(self.tab3, text="  3. Whisper & Qwen Studio  ")
 
-        ttk.Label(config_frame, text="Ollama Model:").grid(row=1, column=1, sticky="e", pady=4)
-        ttk.Entry(config_frame, textvariable=self.model_name_var, width=22).grid(row=1, column=2, sticky="w", padx=6, pady=4)
+        self.build_tab1_editor()
+        self.build_tab2_xtts()
+        self.build_tab3_whisper_qwen()
 
-        # Languages selector
-        ttk.Label(config_frame, text="Source Language:").grid(row=2, column=0, sticky="w", pady=4)
-        src_combo = ttk.Combobox(config_frame, textvariable=self.src_lang_var, values=list(LANG_MAP.keys()), state="readonly", width=15)
-        src_combo.grid(row=2, column=1, sticky="w", padx=6, pady=4)
-
-        ttk.Label(config_frame, text="Target Language:").grid(row=2, column=1, sticky="e", pady=4)
-        tgt_combo = ttk.Combobox(config_frame, textvariable=self.tgt_lang_var, values=list(LANG_MAP.keys()), state="readonly", width=15)
-        tgt_combo.grid(row=2, column=2, sticky="w", padx=6, pady=4)
-
-        # 2. SUBTITLE EDITOR CARD
-        editor_frame = ttk.LabelFrame(self, text=" 2. Subtitle Editor (Source & Translation) ", padding=12)
-        editor_frame.pack(fill="both", expand=True, padx=15, pady=6)
-
-        cols = ("idx", "start", "end", "src_text", "tgt_text")
-        self.tree = ttk.Treeview(editor_frame, columns=cols, show="headings", selectmode="browse")
-        self.tree.heading("idx", text="#")
-        self.tree.heading("start", text="Start")
-        self.tree.heading("end", text="End")
-        self.tree.heading("src_text", text="Source (Whisper - Editable)")
-        self.tree.heading("tgt_text", text="Target (Translation - Editable)")
-
-        self.tree.column("idx", width=40, anchor="center")
-        self.tree.column("start", width=85, anchor="center")
-        self.tree.column("end", width=85, anchor="center")
-        self.tree.column("src_text", width=380)
-        self.tree.column("tgt_text", width=380)
-
-        tree_scroll = ttk.Scrollbar(editor_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=tree_scroll.set)
-        self.tree.pack(side="top", fill="both", expand=True)
-        tree_scroll.pack(side="right", fill="y")
-
-        # In-line Editor Controls
-        edit_control_frame = ttk.Frame(editor_frame, padding=6)
-        edit_control_frame.pack(fill="x", side="bottom")
-
-        # Edit Source Input
-        src_edit_frame = ttk.Frame(edit_control_frame)
-        src_edit_frame.pack(fill="x", pady=2)
-        ttk.Label(src_edit_frame, text="Edit Source Line:", width=18).pack(side="left")
-        self.src_edit_entry = ttk.Entry(src_edit_frame)
-        self.src_edit_entry.pack(side="left", fill="x", expand=True, padx=6)
-
-        # Edit Target Input
-        tgt_edit_frame = ttk.Frame(edit_control_frame)
-        tgt_edit_frame.pack(fill="x", pady=2)
-        ttk.Label(tgt_edit_frame, text="Edit Target Line:", width=18).pack(side="left")
-        self.tgt_edit_entry = ttk.Entry(tgt_edit_frame)
-        self.tgt_edit_entry.pack(side="left", fill="x", expand=True, padx=6)
-
-        self.save_btn = ttk.Button(edit_control_frame, text="Save Selected Row Edits", command=self.save_row_edit)
-        self.save_btn.pack(side="right", pady=4)
-
-        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
-
-        # 3. THREE-STAGE WORKFLOW BUTTONS
-        btn_frame = ttk.Frame(self, padding=8)
-        btn_frame.pack(fill="x", padx=15)
-
-        self.step1_btn = ttk.Button(
-            btn_frame, 
-            text="Step 1: Extract & Transcribe (Whisper)", 
-            command=self.start_step1_transcribe
-        )
-        self.step1_btn.pack(side="left", padx=4, fill="x", expand=True)
-
-        self.step2_btn = ttk.Button(
-            btn_frame, 
-            text="Step 2: Translate Clean Source (Ollama)", 
-            state="disabled", 
-            command=self.start_step2_translate
-        )
-        self.step2_btn.pack(side="left", padx=4, fill="x", expand=True)
-
-        self.step3_btn = ttk.Button(
-            btn_frame, 
-            text="Step 3: Synthesize & Dub Video (XTTS-v2)", 
-            state="disabled", 
-            command=self.start_step3_dub
-        )
-        self.step3_btn.pack(side="left", padx=4, fill="x", expand=True)
-
-        # 4. CONSOLE ACTIVITY LOG
-        log_frame = ttk.LabelFrame(self, text=" Activity Log ", padding=8)
-        log_frame.pack(fill="x", padx=15, pady=6)
-
-        self.log_text = tk.Text(log_frame, height=6, state="disabled", bg="#1E1E1E", fg="#D4D4D4", font=("Menlo", 10))
+        # Global Bottom Activity Log
+        log_frame = ttk.LabelFrame(self, text=" System Activity Log ", padding=8)
+        log_frame.pack(fill="x", padx=10, pady=6)
+        self.log_text = tk.Text(log_frame, height=5, state="disabled", bg="#1E1E1E", fg="#D4D4D4", font=("Menlo", 10))
         self.log_text.pack(fill="x")
-
-    def browse_video(self):
-        file_selected = filedialog.askopenfilename(
-            filetypes=[("Video Files", "*.mp4 *.mov *.mkv *.avi"), ("All Files", "*.*")]
-        )
-        if file_selected:
-            self.video_path_var.set(file_selected)
 
     def log(self, message):
         def _append():
@@ -166,214 +78,379 @@ class DubbingApp(tk.Tk):
             self.log_text.configure(state="disabled")
         self.after(0, _append)
 
-    def on_tree_select(self, event):
-        selected = self.tree.selection()
-        if not selected:
+    # =========================================================================
+    # TAB 1: 3-WAY SPLIT SUBTITLE & VIDEO STUDIO
+    # =========================================================================
+    def build_tab1_editor(self):
+        top_bar = ttk.Frame(self.tab1, padding=8)
+        top_bar.pack(fill="x")
+
+        ttk.Button(top_bar, text="Load Video", command=self.t1_load_video).pack(side="left", padx=4)
+        ttk.Button(top_bar, text="Load Source SRT", command=self.t1_load_src_srt).pack(side="left", padx=4)
+        ttk.Button(top_bar, text="Load Target SRT", command=self.t1_load_tgt_srt).pack(side="left", padx=4)
+        ttk.Button(top_bar, text="Save Both SRTs", command=self.t1_save_both_srts).pack(side="left", padx=12)
+
+        self.t1_status_lbl = ttk.Label(top_bar, text="No video or subtitles loaded.")
+        self.t1_status_lbl.pack(side="right", padx=10)
+
+        # 3-Way Paned Horizontal Window
+        paned = ttk.PanedWindow(self.tab1, orient="horizontal")
+        paned.pack(fill="both", expand=True, padx=8, pady=4)
+
+        # Column 1: Source Transcript
+        left_frame = ttk.LabelFrame(paned, text=" Source Transcript ", padding=6)
+        paned.add(left_frame, weight=3)
+
+        self.src_listbox = tk.Listbox(left_frame, font=("Menlo", 11), selectmode="browse")
+        src_scroll = ttk.Scrollbar(left_frame, orient="vertical", command=self.src_listbox.yview)
+        self.src_listbox.configure(yscrollcommand=src_scroll.set)
+        self.src_listbox.pack(side="left", fill="both", expand=True)
+        src_scroll.pack(side="right", fill="y")
+        self.src_listbox.bind("<<ListboxSelect>>", lambda e: self.t1_on_select("src"))
+        self.src_listbox.bind("<Double-Button-1>", lambda e: self.t1_play_selected_segment())
+
+        # Column 2: Target Translation
+        mid_frame = ttk.LabelFrame(paned, text=" Target Translation (Editable) ", padding=6)
+        paned.add(mid_frame, weight=3)
+
+        self.tgt_listbox = tk.Listbox(mid_frame, font=("Menlo", 11), selectmode="browse")
+        tgt_scroll = ttk.Scrollbar(mid_frame, orient="vertical", command=self.tgt_listbox.yview)
+        self.tgt_listbox.configure(yscrollcommand=tgt_scroll.set)
+        self.tgt_listbox.pack(side="left", fill="both", expand=True)
+        tgt_scroll.pack(side="right", fill="y")
+        self.tgt_listbox.bind("<<ListboxSelect>>", lambda e: self.t1_on_select("tgt"))
+        self.tgt_listbox.bind("<Double-Button-1>", lambda e: self.t1_play_selected_segment())
+
+        # Column 3: Video Player & Inspector
+        right_frame = ttk.LabelFrame(paned, text=" Video Preview & Segment Controls ", padding=6)
+        paned.add(right_frame, weight=2)
+
+        self.t1_video_info = ttk.Label(right_frame, text="No video selected", wraplength=220)
+        self.t1_video_info.pack(pady=10)
+
+        ttk.Button(right_frame, text="▶ Play Entire Video", command=self.t1_play_full_video).pack(fill="x", padx=10, pady=4)
+        ttk.Button(right_frame, text="⚡ Play Selected Segment", command=self.t1_play_selected_segment).pack(fill="x", padx=10, pady=4)
+        ttk.Button(right_frame, text="⏹ Stop Player", command=self.t1_stop_player).pack(fill="x", padx=10, pady=4)
+
+        ttk.Separator(right_frame, orient="horizontal").pack(fill="x", pady=15)
+        self.t1_time_lbl = ttk.Label(right_frame, text="Selected Time: --:-- --> --:--")
+        self.t1_time_lbl.pack(pady=4)
+
+        # Bottom Edit Bar for Tab 1
+        edit_card = ttk.Frame(self.tab1, padding=8)
+        edit_card.pack(fill="x", padx=8, pady=4)
+
+        ttk.Label(edit_card, text="Source Line:").grid(row=0, column=0, sticky="w")
+        self.t1_edit_src_entry = ttk.Entry(edit_card, width=95)
+        self.t1_edit_src_entry.grid(row=0, column=1, padx=6, pady=2, sticky="ew")
+
+        ttk.Label(edit_card, text="Target Line:").grid(row=1, column=0, sticky="w")
+        self.t1_edit_tgt_entry = ttk.Entry(edit_card, width=95)
+        self.t1_edit_tgt_entry.grid(row=1, column=1, padx=6, pady=2, sticky="ew")
+
+        ttk.Button(edit_card, text="Update Selected Line", command=self.t1_commit_edit).grid(row=0, column=2, rowspan=2, padx=10)
+        edit_card.columnconfigure(1, weight=1)
+
+    def t1_load_video(self, file_path=None):
+        if not file_path:
+            file_path = filedialog.askopenfilename(filetypes=[("Video Files", "*.mp4 *.mov *.mkv *.avi")])
+        if file_path:
+            self.current_preview_video = file_path
+            self.t1_video_info.configure(text=f"Loaded:\n{os.path.basename(file_path)}")
+            self.log(f"Video loaded into Editor: {file_path}")
+
+    def t1_load_src_srt(self, file_path=None):
+        if not file_path:
+            file_path = filedialog.askopenfilename(filetypes=[("Subtitle Files", "*.srt")])
+        if file_path:
+            self.src_subs = pysrt.open(file_path, encoding="utf-8")
+            self.t1_refresh_lists()
+            self.log(f"Loaded source subtitles: {file_path}")
+
+    def t1_load_tgt_srt(self, file_path=None):
+        if not file_path:
+            file_path = filedialog.askopenfilename(filetypes=[("Subtitle Files", "*.srt")])
+        if file_path:
+            self.tgt_subs = pysrt.open(file_path, encoding="utf-8")
+            self.t1_refresh_lists()
+            self.log(f"Loaded target subtitles: {file_path}")
+
+    def t1_refresh_lists(self):
+        self.src_listbox.delete(0, tk.END)
+        self.tgt_listbox.delete(0, tk.END)
+
+        max_len = max(len(self.src_subs), len(self.tgt_subs))
+        for i in range(max_len):
+            src_text = self.src_subs[i].text if i < len(self.src_subs) else ""
+            tgt_text = self.tgt_subs[i].text if i < len(self.tgt_subs) else ""
+            self.src_listbox.insert(tk.END, f"{i+1}. {src_text}")
+            self.tgt_listbox.insert(tk.END, f"{i+1}. {tgt_text}")
+        self.t1_status_lbl.configure(text=f"{max_len} subtitle lines loaded.")
+
+    def t1_on_select(self, source):
+        if source == "src":
+            sel = self.src_listbox.curselection()
+            if sel:
+                idx = sel[0]
+                self.tgt_listbox.selection_clear(0, tk.END)
+                self.tgt_listbox.selection_set(idx)
+                self.tgt_listbox.see(idx)
+        else:
+            sel = self.tgt_listbox.curselection()
+            if sel:
+                idx = sel[0]
+                self.src_listbox.selection_clear(0, tk.END)
+                self.src_listbox.selection_set(idx)
+                self.src_listbox.see(idx)
+
+        idx = sel[0] if sel else None
+        if idx is not None:
+            s_text = self.src_subs[idx].text if idx < len(self.src_subs) else ""
+            t_text = self.tgt_subs[idx].text if idx < len(self.tgt_subs) else ""
+            self.t1_edit_src_entry.delete(0, tk.END)
+            self.t1_edit_src_entry.insert(0, s_text)
+            self.t1_edit_tgt_entry.delete(0, tk.END)
+            self.t1_edit_tgt_entry.insert(0, t_text)
+
+            if idx < len(self.src_subs):
+                st = str(self.src_subs[idx].start)
+                et = str(self.src_subs[idx].end)
+                self.t1_time_lbl.configure(text=f"Selected Time:\n{st} --> {et}")
+
+    def t1_commit_edit(self):
+        sel = self.src_listbox.curselection()
+        if not sel:
             return
-        vals = self.tree.item(selected[0], "values")
-        
-        self.src_edit_entry.delete(0, tk.END)
-        self.src_edit_entry.insert(0, vals[3])
+        idx = sel[0]
+        new_s = self.t1_edit_src_entry.get().strip()
+        new_t = self.t1_edit_tgt_entry.get().strip()
 
-        self.tgt_edit_entry.delete(0, tk.END)
-        self.tgt_edit_entry.insert(0, vals[4])
+        if idx < len(self.src_subs):
+            self.src_subs[idx].text = new_s
+        if idx < len(self.tgt_subs):
+            self.tgt_subs[idx].text = new_t
 
-    def save_row_edit(self):
-        selected = self.tree.selection()
-        if not selected:
+        self.t1_refresh_lists()
+        self.src_listbox.selection_set(idx)
+        self.tgt_listbox.selection_set(idx)
+        self.log(f"Updated line #{idx+1}")
+
+    def t1_save_both_srts(self):
+        folder = filedialog.askdirectory(title="Select Folder to Save Subtitles")
+        if not folder:
             return
-        idx = int(self.tree.item(selected[0], "values")[0])
-        new_src = self.src_edit_entry.get().strip()
-        new_tgt = self.tgt_edit_entry.get().strip()
+        src_path = os.path.join(folder, "source_edited.srt")
+        tgt_path = os.path.join(folder, "target_edited.srt")
+        if self.src_subs:
+            self.src_subs.save(src_path, encoding="utf-8")
+        if self.tgt_subs:
+            self.tgt_subs.save(tgt_path, encoding="utf-8")
+        self.log(f"Saved SRTs to {folder}")
+        messagebox.showinfo("Saved", f"SRT files saved to:\n{folder}")
 
-        # Update in-memory objects
-        if self.subs_cache:
-            for item in self.subs_cache:
-                if item.index == idx:
-                    item.text = new_src
-                    break
+    def t1_play_full_video(self):
+        if not self.current_preview_video:
+            messagebox.showwarning("Warning", "Load a video first.")
+            return
+        self.t1_stop_player()
+        cmd = [FFPLAY_BIN, "-autoexit", "-window_title", "Full Preview", self.current_preview_video]
+        self.ffplay_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        if self.trans_subs_cache:
-            for item in self.trans_subs_cache:
-                if item.index == idx:
-                    item.text = new_tgt
-                    break
+    def t1_play_selected_segment(self):
+        if not self.current_preview_video:
+            messagebox.showwarning("Warning", "Load a video first.")
+            return
+        sel = self.src_listbox.curselection()
+        if not sel or sel[0] >= len(self.src_subs):
+            return
+        idx = sel[0]
+        item = self.src_subs[idx]
+        start_secs = (item.start.hours * 3600 + item.start.minutes * 60 + item.start.seconds) + (item.start.milliseconds / 1000.0)
+        dur = ((item.end.hours * 3600 + item.end.minutes * 60 + item.end.seconds) + (item.end.milliseconds / 1000.0)) - start_secs
 
-        # Update table UI
-        vals = list(self.tree.item(selected[0], "values"))
-        vals[3] = new_src
-        vals[4] = new_tgt
-        self.tree.item(selected[0], values=vals)
+        self.t1_stop_player()
+        cmd = [
+            FFPLAY_BIN, "-ss", str(start_secs), "-t", str(max(dur, 0.5)),
+            "-autoexit", "-window_title", f"Segment #{idx+1}", self.current_preview_video
+        ]
+        self.ffplay_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        self.log(f"Row #{idx} updated.")
+    def t1_stop_player(self):
+        if self.ffplay_proc and self.ffplay_proc.poll() is None:
+            self.ffplay_proc.terminate()
+            self.ffplay_proc = None
 
-    def set_buttons_state(self, s1="normal", s2="normal", s3="normal"):
-        self.step1_btn.configure(state=s1)
-        self.step2_btn.configure(state=s2)
-        self.step3_btn.configure(state=s3)
+    # =========================================================================
+    # TAB 2: STANDALONE XTTS DUBBER
+    # =========================================================================
+    def build_tab2_xtts(self):
+        frame = ttk.LabelFrame(self.tab2, text=" Dub Any Video from an SRT File ", padding=20)
+        frame.pack(fill="both", expand=True, padx=25, pady=20)
 
-    # -------------------------------------------------------------------
-    # STEP 1: EXTRACT & TRANSCRIBE
-    # -------------------------------------------------------------------
-    def start_step1_transcribe(self):
-        video_path = self.video_path_var.get().strip()
-        if not os.path.exists(video_path):
-            messagebox.showerror("Error", f"Invalid video file path:\n'{video_path}'")
+        self.t2_video_var = tk.StringVar()
+        self.t2_srt_var = tk.StringVar()
+        self.t2_outdir_var = tk.StringVar(value="xtts_dubbed_output")
+        self.t2_lang_var = tk.StringVar(value="Hindi")
+
+        # Video Selection
+        ttk.Label(frame, text="Input Video:").grid(row=0, column=0, sticky="w", pady=8)
+        ttk.Entry(frame, textvariable=self.t2_video_var, width=65).grid(row=0, column=1, padx=6, pady=8)
+        ttk.Button(frame, text="Browse...", command=lambda: self.browse_to_var(self.t2_video_var, "video")).grid(row=0, column=2)
+
+        # SRT Selection
+        ttk.Label(frame, text="Translated SRT:").grid(row=1, column=0, sticky="w", pady=8)
+        ttk.Entry(frame, textvariable=self.t2_srt_var, width=65).grid(row=1, column=1, padx=6, pady=8)
+        ttk.Button(frame, text="Browse...", command=lambda: self.browse_to_var(self.t2_srt_var, "srt")).grid(row=1, column=2)
+
+        # Target Language
+        ttk.Label(frame, text="Target Language:").grid(row=2, column=0, sticky="w", pady=8)
+        ttk.Combobox(frame, textvariable=self.t2_lang_var, values=list(LANG_MAP.keys()), state="readonly", width=20).grid(row=2, column=1, sticky="w", padx=6, pady=8)
+
+        # Output Folder
+        ttk.Label(frame, text="Output Folder:").grid(row=3, column=0, sticky="w", pady=8)
+        ttk.Entry(frame, textvariable=self.t2_outdir_var, width=30).grid(row=3, column=1, sticky="w", padx=6, pady=8)
+
+        # Action Button
+        self.t2_btn = ttk.Button(frame, text="🎙️ Clone Voice & Generate Dubbed Video", command=self.t2_start_dubbing)
+        self.t2_btn.grid(row=4, column=0, columnspan=3, pady=25, sticky="ew")
+
+    def t2_start_dubbing(self):
+        video_path = self.t2_video_var.get().strip()
+        srt_path = self.t2_srt_var.get().strip()
+        out_dir = self.t2_outdir_var.get().strip()
+        tgt_name = self.t2_lang_var.get()
+        tgt_code = LANG_MAP[tgt_name]
+
+        if not os.path.exists(video_path) or not os.path.exists(srt_path):
+            messagebox.showerror("Error", "Please select valid video and SRT files.")
             return
 
-        self.set_buttons_state("disabled", "disabled", "disabled")
-        threading.Thread(target=self._step1_worker, daemon=True).start()
+        self.t2_btn.configure(state="disabled")
+        threading.Thread(target=self._t2_worker, args=(video_path, srt_path, out_dir, tgt_code), daemon=True).start()
 
-    def _step1_worker(self):
+    def _t2_worker(self, video_path, srt_path, out_dir, tgt_code):
         try:
-            video_path = self.video_path_var.get().strip()
-            out_dir = self.folder_name_var.get().strip()
+            os.makedirs(out_dir, exist_ok=True)
+            temp_dir = os.path.join(out_dir, "temp_segments")
+            os.makedirs(temp_dir, exist_ok=True)
+
+            orig_audio = os.path.join(out_dir, "extracted_original.wav")
+            dubbed_audio = os.path.join(out_dir, "dubbed_voice.wav")
+            voice_sample = os.path.join(out_dir, "voice_sample.wav")
+            ext = os.path.splitext(video_path)[1]
+            final_video = os.path.join(out_dir, f"dubbed_final{ext}")
+
+            # 1. Extract audio if not present
+            dub_pipeline.extract_audio(video_path, orig_audio, log_fn=self.log)
+
+            # 2. Dub with XTTS
+            subs = pysrt.open(srt_path, encoding="utf-8")
+            dub_pipeline.dub_with_xtts(subs, orig_audio, dubbed_audio, voice_sample, temp_dir, tgt_code, log_fn=self.log)
+
+            # 3. Remux
+            dub_pipeline.remux_video(video_path, dubbed_audio, final_video, log_fn=self.log)
+
+            self.log(f"\nTab 2 Dubbing complete: {final_video}")
+            self.after(0, lambda: messagebox.showinfo("Success", f"Dubbing complete!\nSaved to:\n{final_video}"))
+        except Exception as e:
+            self.log(f"Error in Tab 2: {e}")
+        finally:
+            self.after(0, lambda: self.t2_btn.configure(state="normal"))
+
+    # =========================================================================
+    # TAB 3: WHISPER & QWEN TRANSCRIBE / TRANSLATE
+    # =========================================================================
+    def build_tab3_whisper_qwen(self):
+        frame = ttk.LabelFrame(self.tab3, text=" Speech-To-Text (Whisper) & Translation (Qwen) ", padding=20)
+        frame.pack(fill="both", expand=True, padx=25, pady=20)
+
+        self.t3_video_var = tk.StringVar()
+        self.t3_src_lang_var = tk.StringVar(value="Turkish")
+        self.t3_tgt_lang_var = tk.StringVar(value="Hindi")
+        self.t3_model_var = tk.StringVar(value="qwen3.5:9b-instruct")
+        self.t3_outdir_var = tk.StringVar(value="whisper_qwen_output")
+
+        # Video
+        ttk.Label(frame, text="Input Video:").grid(row=0, column=0, sticky="w", pady=8)
+        ttk.Entry(frame, textvariable=self.t3_video_var, width=65).grid(row=0, column=1, padx=6, pady=8)
+        ttk.Button(frame, text="Browse...", command=lambda: self.browse_to_var(self.t3_video_var, "video")).grid(row=0, column=2)
+
+        # Languages
+        ttk.Label(frame, text="Source Language:").grid(row=1, column=0, sticky="w", pady=8)
+        ttk.Combobox(frame, textvariable=self.t3_src_lang_var, values=list(LANG_MAP.keys()), state="readonly", width=20).grid(row=1, column=1, sticky="w", padx=6, pady=8)
+
+        ttk.Label(frame, text="Target Language:").grid(row=2, column=0, sticky="w", pady=8)
+        ttk.Combobox(frame, textvariable=self.t3_tgt_lang_var, values=list(LANG_MAP.keys()), state="readonly", width=20).grid(row=2, column=1, sticky="w", padx=6, pady=8)
+
+        # Model
+        ttk.Label(frame, text="Ollama Model:").grid(row=3, column=0, sticky="w", pady=8)
+        ttk.Entry(frame, textvariable=self.t3_model_var, width=25).grid(row=3, column=1, sticky="w", padx=6, pady=8)
+
+        # Output
+        ttk.Label(frame, text="Output Folder:").grid(row=4, column=0, sticky="w", pady=8)
+        ttk.Entry(frame, textvariable=self.t3_outdir_var, width=25).grid(row=4, column=1, sticky="w", padx=6, pady=8)
+
+        # Actions
+        self.t3_btn = ttk.Button(frame, text="🚀 1. Transcribe & Translate -> 2. Send Directly to Editor (Tab 1)", command=self.t3_start_process)
+        self.t3_btn.grid(row=5, column=0, columnspan=3, pady=25, sticky="ew")
+
+    def t3_start_process(self):
+        video_path = self.t3_video_var.get().strip()
+        if not os.path.exists(video_path):
+            messagebox.showerror("Error", "Please select a valid video file.")
+            return
+
+        self.t3_btn.configure(state="disabled")
+        threading.Thread(target=self._t3_worker, daemon=True).start()
+
+    def _t3_worker(self):
+        try:
+            video_path = self.t3_video_var.get().strip()
+            out_dir = self.t3_outdir_var.get().strip()
             os.makedirs(out_dir, exist_ok=True)
 
-            src_name = self.src_lang_var.get()
+            src_name = self.t3_src_lang_var.get()
             src_code = LANG_MAP[src_name]
+            tgt_name = self.t3_tgt_lang_var.get()
+            model_name = self.t3_model_var.get()
 
-            audio_path = os.path.join(out_dir, "original_audio.wav")
-            src_srt_path = os.path.join(out_dir, f"{src_name.lower()}_subtitles.srt")
+            audio_path = os.path.join(out_dir, "extracted_audio.wav")
+            src_srt_path = os.path.join(out_dir, f"{src_name.lower()}_transcript.srt")
+            tgt_srt_path = os.path.join(out_dir, f"{tgt_name.lower()}_translated.srt")
 
             # 1. Extract audio
             dub_pipeline.extract_audio(video_path, audio_path, log_fn=self.log)
 
-            # 2. Transcribe
-            self.subs_cache = dub_pipeline.transcribe_to_srt(
-                audio_path, src_srt_path, src_name, src_code, log_fn=self.log
-            )
-            self.trans_subs_cache = None  # Reset downstream translation
+            # 2. Whisper
+            subs = dub_pipeline.transcribe_to_srt(audio_path, src_srt_path, src_name, src_code, log_fn=self.log)
 
-            def _populate():
-                for row in self.tree.get_children():
-                    self.tree.delete(row)
-                for item in self.subs_cache:
-                    self.tree.insert("", "end", values=(
-                        item.index,
-                        str(item.start),
-                        str(item.end),
-                        item.text,
-                        ""  # Target empty until Step 2
-                    ))
-                self.set_buttons_state("normal", "normal", "disabled")
-                self.log("\nStep 1 Done! Review and correct the 'Source' text in the table above before translating.")
-                messagebox.showinfo(
-                    "Transcription Ready",
-                    "Transcription complete!\n\nReview the source text in the table above, fix any misheard words, and then click 'Step 2: Translate Clean Source'."
-                )
+            # 3. Qwen translation
+            trans_subs = dub_pipeline.translate_subtitles_ollama(subs, tgt_srt_path, model_name, src_name, tgt_name, log_fn=self.log)
 
-            self.after(0, _populate)
+            # Automatically inject into Tab 1
+            def _send_to_tab1():
+                self.t1_load_video(video_path)
+                self.src_subs = subs
+                self.tgt_subs = trans_subs
+                self.t1_refresh_lists()
+                self.notebook.select(self.tab1)
+                messagebox.showinfo("Success", "Transcription & Translation finished!\nLoaded directly into Tab 1 for review and playback.")
+
+            self.after(0, _send_to_tab1)
 
         except Exception as e:
-            self.log(f"Error during Step 1: {e}")
-            self.after(0, lambda: self.set_buttons_state("normal", "disabled", "disabled"))
+            self.log(f"Error in Tab 3: {e}")
+        finally:
+            self.after(0, lambda: self.t3_btn.configure(state="normal"))
 
-    # -------------------------------------------------------------------
-    # STEP 2: TRANSLATE WITH OLLAMA
-    # -------------------------------------------------------------------
-    def start_step2_translate(self):
-        if not self.subs_cache:
-            messagebox.showwarning("Warning", "Run Step 1 first to generate subtitles.")
-            return
-
-        self.set_buttons_state("disabled", "disabled", "disabled")
-        threading.Thread(target=self._step2_worker, daemon=True).start()
-
-    def _step2_worker(self):
-        try:
-            out_dir = self.folder_name_var.get().strip()
-            src_name = self.src_lang_var.get()
-            tgt_name = self.tgt_lang_var.get()
-            model_name = self.model_name_var.get()
-
-            # Save any edits made to the source text before passing to Ollama
-            src_srt_path = os.path.join(out_dir, f"{src_name.lower()}_subtitles.srt")
-            self.subs_cache.save(src_srt_path, encoding="utf-8")
-            self.log(f"Saved edited source subtitles to {src_srt_path}")
-
-            tgt_srt_path = os.path.join(out_dir, f"{tgt_name.lower()}_subtitles.srt")
-
-            # 3. Translate using the user-edited source cache
-            self.trans_subs_cache = dub_pipeline.translate_subtitles_ollama(
-                self.subs_cache, tgt_srt_path, model_name, src_name, tgt_name, log_fn=self.log
-            )
-
-            def _refresh_table():
-                for row in self.tree.get_children():
-                    self.tree.delete(row)
-                for src_item, tgt_item in zip(self.subs_cache, self.trans_subs_cache):
-                    self.tree.insert("", "end", values=(
-                        src_item.index,
-                        str(src_item.start),
-                        str(src_item.end),
-                        src_item.text,
-                        tgt_item.text
-                    ))
-                self.set_buttons_state("normal", "normal", "normal")
-                self.log("\nStep 2 Done! Review the translation lines, then proceed to Dubbing.")
-                messagebox.showinfo(
-                    "Translation Ready", 
-                    "Translation complete!\n\nYou can now make any adjustments to the target language lines, then click 'Step 3: Synthesize & Dub Video'."
-                )
-
-            self.after(0, _refresh_table)
-
-        except Exception as e:
-            self.log(f"Error during Step 2: {e}")
-            self.after(0, lambda: self.set_buttons_state("normal", "normal", "disabled"))
-
-    # -------------------------------------------------------------------
-    # STEP 3: DUB & REMUX VIDEO (XTTS-V2)
-    # -------------------------------------------------------------------
-    def start_step3_dub(self):
-        if not self.trans_subs_cache:
-            messagebox.showwarning("Warning", "Run Step 2 first to translate subtitles.")
-            return
-
-        self.set_buttons_state("disabled", "disabled", "disabled")
-        threading.Thread(target=self._step3_worker, daemon=True).start()
-
-    def _step3_worker(self):
-        try:
-            out_dir = self.folder_name_var.get().strip()
-            video_path = self.video_path_var.get().strip()
-            tgt_name = self.tgt_lang_var.get()
-            tgt_code = LANG_MAP[tgt_name]
-
-            # Save latest target subtitle edits to disk
-            tgt_srt_path = os.path.join(out_dir, f"{tgt_name.lower()}_subtitles.srt")
-            self.trans_subs_cache.save(tgt_srt_path, encoding="utf-8")
-            self.log(f"Saved approved target subtitles to {tgt_srt_path}")
-
-            audio_path = os.path.join(out_dir, "original_audio.wav")
-            dubbed_audio_path = os.path.join(out_dir, "dubbed_audio.wav")
-            voice_sample_path = os.path.join(out_dir, "voice_sample.wav")
-            temp_dir = os.path.join(out_dir, "temp_segments")
-            os.makedirs(temp_dir, exist_ok=True)
-
-            ext = os.path.splitext(video_path)[1]
-            final_video_path = os.path.join(out_dir, f"output_dubbed_video{ext}")
-
-            # 4. XTTS Voice Synthesis
-            dub_pipeline.dub_with_xtts(
-                self.trans_subs_cache, audio_path, dubbed_audio_path, voice_sample_path, temp_dir, tgt_code, log_fn=self.log
-            )
-
-            # 5. FFmpeg Remux
-            dub_pipeline.remux_video(video_path, dubbed_audio_path, final_video_path, log_fn=self.log)
-
-            def _done():
-                self.set_buttons_state("normal", "normal", "normal")
-                messagebox.showinfo("Success", f"Dubbing complete!\nSaved to:\n{final_video_path}")
-
-            self.after(0, _done)
-
-        except Exception as e:
-            self.log(f"Error during Step 3: {e}")
-            self.after(0, lambda: self.set_buttons_state("normal", "normal", "normal"))
+    # Helper
+    def browse_to_var(self, target_var, mode="video"):
+        types = [("Video Files", "*.mp4 *.mov *.mkv *.avi")] if mode == "video" else [("Subtitle Files", "*.srt")]
+        selected = filedialog.askopenfilename(filetypes=types)
+        if selected:
+            target_var.set(selected)
 
 
 if __name__ == "__main__":
-    app = DubbingApp()
+    app = StudioApp()
     app.mainloop()
