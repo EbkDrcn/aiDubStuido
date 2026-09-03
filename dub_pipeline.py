@@ -52,7 +52,7 @@ def extract_audio(video_path, audio_path, log_fn=print):
 
 def transcribe_to_srt(audio_path, srt_output_path, src_lang_name, src_lang_code, log_fn=print):
     log_fn(f"Step 2: Transcribing {src_lang_name} speech with Whisper...")
-    model = whisper.load_model("medium", device="cpu")
+    model = whisper.load_model("medium", device=DEVICE)
     result = model.transcribe(audio_path, language=src_lang_code, task="transcribe")
 
     subs = pysrt.SubRipFile()
@@ -112,8 +112,11 @@ def translate_subtitles_ollama(subs, srt_output_path, model_name, src_lang_name,
 
 def dub_with_xtts(translated_subs, reference_audio_path, output_audio_path, voice_sample_path, temp_dir, tgt_lang_code, log_fn=print):
     log_fn("Step 4: Synthesizing dubbed audio with cloned voice via XTTS-v2...")
+    #Run XTTS-v2 TTS model with CPU
     tts = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2", gpu=False)
-
+    if torch.backends.mps.is_available():
+        tts.to("mps") #Logging that MPS is available and moving the model to MPS
+        log_fn("XTTS-v2 hardware acceleration enabled on Apple Silicon (MPS).")
     orig_audio = AudioSegment.from_wav(reference_audio_path)
     final_canvas = AudioSegment.silent(duration=len(orig_audio))
 
